@@ -77,9 +77,11 @@ export function analyseAddress(address, clipboardValue, pastedValue, sentAddress
   }
 
   // 3. Near-duplicate of a previously used address (first/last char spoofing)
+  // Compare case-sensitively — TON addresses are base64 and case matters visually.
+  // Lowercasing before diff would hide substitutions like 'X'→'x' (distance=0 after norm).
   const SIMILARITY_THRESHOLD = 6; // edit distance
   for (const known of sentAddresses) {
-    const dist = levenshtein(normAddr, norm(known.address));
+    const dist = levenshtein(address.trim(), known.address);
     if (dist > 0 && dist <= SIMILARITY_THRESHOLD) {
       warnings.push({
         id: `similar_to_${known.address.slice(0, 8)}`,
@@ -95,6 +97,7 @@ export function analyseAddress(address, clipboardValue, pastedValue, sentAddress
   }
 
   // 4. Exact first-4 and last-4 character match with a known address (but different overall)
+  // Case-sensitive: 'EQAb' vs 'EQab' are visually different and must trigger a warning.
   for (const known of sentAddresses) {
     if (known.address === address) break; // exact match, no warning needed
     const prefix = 4;
@@ -102,9 +105,9 @@ export function analyseAddress(address, clipboardValue, pastedValue, sentAddress
     if (
       address.length >= prefix + suffix &&
       known.address.length >= prefix + suffix &&
-      address.slice(0, prefix).toLowerCase() === known.address.slice(0, prefix).toLowerCase() &&
-      address.slice(-suffix).toLowerCase() === known.address.slice(-suffix).toLowerCase() &&
-      norm(address) !== norm(known.address)
+      address.slice(0, prefix) === known.address.slice(0, prefix) &&
+      address.slice(-suffix) === known.address.slice(-suffix) &&
+      address.trim() !== known.address
     ) {
       warnings.push({
         id: `prefix_suffix_match_${known.address.slice(0, 8)}`,

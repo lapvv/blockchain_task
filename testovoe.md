@@ -59,6 +59,17 @@ UI должен быть минималистичным, но предупреж
 
 0QCLqt28mi8KClYQl5dSWWrLhpXmiRCTOXtJsupOClKV2a7b
 
+birth street almost omit change sight physical mom team honey nuclear dutch own icon sense tennis shine simple interest morning crawl giant long wage
+
 0QCREk4OhVWB3Oz0zT4QMGPXqxHYjNI4Q2QvLNY2I3OlxG30
+UQDixIy0tkwzeMJUQBZRKtf8HoMIGTstSq100m4VrmTyy9La
+EQDixIy0tkwzeMJUQBZRKtf8HoMIGTstSq100m4VrmTyy48f
 
 coil cloud music modify rain goose debate carbon ready wrong embark goddess wine describe system alpha betray fat output biology true battle juice timber
+
+
+С чем столкнулся:
+защита не воспринимала lowercase - uppercase
+ошибка 429 - отказ от tonClient, самописный клиент.
+
+стилистические ошибки

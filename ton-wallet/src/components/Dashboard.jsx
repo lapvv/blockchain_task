@@ -37,6 +37,9 @@ export default function Dashboard({ wallet, onLogout }) {
         setBalanceError('Could not fetch balance. Check your connection.');
       }
 
+      // Small pause between requests to avoid rate limiting
+      await new Promise(r => setTimeout(r, 1200));
+
       // Transactions — show cached first
       const cached = getCachedTxs(wallet.address);
       if (cached) setTransactions(cached);
@@ -58,7 +61,7 @@ export default function Dashboard({ wallet, onLogout }) {
   useEffect(() => {
     loadData(true);
     // Auto-refresh every 30 s
-    const interval = setInterval(() => loadData(false), 30000);
+    const interval = setInterval(() => loadData(false), 60000);
     return () => clearInterval(interval);
   }, [loadData]);
 
@@ -130,7 +133,7 @@ export default function Dashboard({ wallet, onLogout }) {
             Receive
           </button>
           <button
-            className={`action-btn action-btn--primary ${view === 'send' ? 'active' : ''}`}
+            className={`action-btn ${view === 'send' ? 'active' : ''}`}
             onClick={() => setView(view === 'send' ? 'home' : 'send')}
           >
             Send

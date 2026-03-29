@@ -1,11 +1,24 @@
 import { mnemonicNew, mnemonicToPrivateKey, mnemonicValidate } from '@ton/crypto';
-import { WalletContractV4, TonClient, fromNano, toNano, internal } from '@ton/ton';
-import { Address } from '@ton/core';
+import { WalletContractV4, fromNano, toNano, internal } from '@ton/ton';
+import { Address, beginCell, external, storeMessage } from '@ton/core';
 
-const TESTNET_ENDPOINT = 'https://testnet.toncenter.com/api/v2/jsonRPC';
 const TONCENTER_REST = 'https://testnet.toncenter.com/api/v2';
 
-export const client = new TonClient({ endpoint: TESTNET_ENDPOINT });
+// ─── HTTP with 429 retry ──────────────────────────────────────────────────────
+
+async function fetchWithRetry(url, options = {}, retries = 4, backoff = 3000) {
+  for (let i = 0; i < retries; i++) {
+    const res = await fetch(url, options);
+    if (res.status === 429) {
+      if (i < retries - 1) {
+        await delay(backoff * (i + 1));
+        continue;
+      }
+      throw new Error('TONCenter rate limit exceeded. Please wait a moment and try again.');
+    }
+    return res;
+  }
+}
 
 // ─── Wallet creation / import ────────────────────────────────────────────────
 
@@ -45,7 +58,7 @@ export function isValidAddress(addr) {
 // ─── Balance ─────────────────────────────────────────────────────────────────
 
 export async function getBalance(address) {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `${TONCENTER_REST}/getAddressBalance?address=${encodeURIComponent(address)}`
   );
   const data = await res.json();
@@ -56,7 +69,7 @@ export async function getBalance(address) {
 // ─── Transactions ────────────────────────────────────────────────────────────
 
 export async function getTransactions(address, limit = 50) {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `${TONCENTER_REST}/getTransactions?address=${encodeURIComponent(address)}&limit=${limit}`
   );
   const data = await res.json();
@@ -102,27 +115,53 @@ export async function getTransactions(address, limit = 50) {
   });
 }
 
-// ─── Send ─────────────────────────────────────────────────────────────────────
+// ─── Seqno via REST (bypasses TonClient / avoids its internal 429 errors) ────
 
-export async function sendTon({ keyPair, wallet, toAddress, amount, comment = '' }) {
-  const contract = client.open(wallet);
-
-  // Ensure wallet is deployed; if not yet, first send deploys it
-  let seqno = 0;
+async function getSeqnoRest(address) {
+  // Try /getWalletInformation first — simplest, returns seqno directly
   try {
-    seqno = await contract.getSeqno();
+    const res = await fetchWithRetry(
+      `${TONCENTER_REST}/getWalletInformation?address=${encodeURIComponent(address)}`
+    );
+    const data = await res.json();
+    if (data.ok && typeof data.result?.seqno === 'number') {
+      return data.result.seqno;
+    }
   } catch {
-    seqno = 0;
+    // fall through to runGetMethod
   }
 
-  const parsedTo = Address.parse(toAddress);
+  // Fallback: POST runGetMethod
+  try {
+    const res = await fetchWithRetry(`${TONCENTER_REST}/runGetMethod`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address, method: 'seqno', stack: [] }),
+    });
+    const data = await res.json();
+    if (!data.ok) return 0;
+    const stack = data.result?.stack;
+    if (!stack || stack.length === 0) return 0;
+    // stack entry is ["num", "0xHEX"] or ["num", decimalString]
+    const raw = stack[0][1];
+    return typeof raw === 'number' ? raw : parseInt(raw, raw.startsWith('0x') ? 16 : 10) || 0;
+  } catch {
+    return 0;
+  }
+}
 
-  await contract.sendTransfer({
+// ─── Send (all network via fetchWithRetry, no TonClient) ──────────────────────
+
+export async function sendTon({ keyPair, wallet, toAddress, amount, comment = '' }) {
+  const walletAddress = wallet.address.toString({ testOnly: true, bounceable: false });
+  const seqno = await getSeqnoRest(walletAddress);
+
+  const transfer = wallet.createTransfer({
     secretKey: keyPair.secretKey,
     seqno,
     messages: [
       internal({
-        to: parsedTo,
+        to: Address.parse(toAddress),
         value: toNano(amount),
         bounce: false,
         body: comment || undefined,
@@ -130,22 +169,35 @@ export async function sendTon({ keyPair, wallet, toAddress, amount, comment = ''
     ],
   });
 
+  // Wrap in external message and serialize to BOC
+  const externalMsg = external({ to: wallet.address, body: transfer });
+  const cell = beginCell().store(storeMessage(externalMsg)).endCell();
+  const boc = cell.toBoc().toString('base64');
+
+  const res = await fetchWithRetry(`${TONCENTER_REST}/sendBoc`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boc }),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || 'Failed to broadcast transaction');
+
   return seqno;
 }
 
-// ─── Poll for confirmation ────────────────────────────────────────────────────
+// ─── Poll for confirmation via REST ──────────────────────────────────────────
 
 export async function waitForSeqnoIncrease(wallet, initialSeqno, timeoutMs = 60000) {
-  const contract = client.open(wallet);
+  const walletAddress = wallet.address.toString({ testOnly: true, bounceable: false });
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    await delay(3000);
+    await delay(6000);
     try {
-      const current = await contract.getSeqno();
+      const current = await getSeqnoRest(walletAddress);
       if (current > initialSeqno) return true;
     } catch {
-      // wallet not yet deployed — keep waiting
+      // keep waiting
     }
   }
   return false;

@@ -310,9 +310,7 @@ a:hover { text-decoration: underline; }
   transition: background 0.15s;
 }
 .action-btn:hover   { background: var(--border); }
-.action-btn.active  { border-color: var(--accent); color: var(--accent); }
-.action-btn--primary { background: var(--accent); color: #fff; border-color: transparent; }
-.action-btn--primary:hover { background: var(--accent-h); }
+.action-btn.active  { border-color: var(--accent); color: var(--accent); background: var(--surface2); }
 
 /* ─── Send screen ──────────────────────────────────────────────────────────── */
 .send-screen, .receive-screen {
@@ -393,7 +391,7 @@ a:hover { text-decoration: underline; }
   border-radius: var(--radius);
   padding: 1.75rem;
   width: 100%;
-  max-width: 460px;
+  max-width: 529px;
   max-height: 90vh;
   overflow-y: auto;
 }
