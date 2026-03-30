@@ -1,42 +1,193 @@
-# React + Vite
+# TON Testnet Wallet — Архитектура, компромиссы и дальнейшие улучшения
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+---
 
-Currently, two official plugins are available:
+## 0. Запуск
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- переключиться в директорию ton-wallet
+- выполнить в консоли npm install
+- выполнить в консоли npm run dev
 
-## React Compiler
+---
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 1. Архитектура
 
-## Expanding the ESLint configuration
+### Стек
+- **React + Vite** — SPA без маршрутизации (состояние управляется через App.jsx)
+- **@ton/ton, @ton/core, @ton/crypto** — официальный TON SDK для генерации ключей, построения транзакций и парсинга адресов
+- **vite-plugin-node-polyfills** — полифилл `Buffer` и Node.js глобалей, необходимых SDK в браузере
+- **qrcode** — генерация QR-кода для адреса получения
+- **TONCenter Testnet REST API** (`https://testnet.toncenter.com/api/v2`) — единственный источник данных блокчейна
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### Структура файлов
 
-TON Testnet Wallet — Implementation Summary
-Run: cd ton-wallet && npm run dev → http://localhost:5173
+```
+src/
+├── App.jsx                   — корневой компонент, управление экранами
+├── main.jsx                  — точка входа
+├── index.css / App.css       — глобальные стили (тёмная тема)
+├── components/
+│   ├── Setup.jsx             — создание / импорт кошелька
+│   ├── Dashboard.jsx         — баланс + история + навигация
+│   ├── Send.jsx              — форма отправки, анализ безопасности, подтверждение
+│   ├── Receive.jsx           — QR-код и адрес для получения
+│   └── TransactionList.jsx   — список транзакций с поиском
+└── utils/
+    ├── ton.js                — вся работа с блокчейном
+    ├── addressSecurity.js    — анализ адреса на признаки атак
+    └── storage.js            — localStorage: кошелёк, история адресов, кэш транзакций
+```
 
-Stack
-React + Vite (no backend, pure browser app)
-@ton/ton + @ton/core + @ton/crypto for wallet operations
-TONCenter testnet REST API (testnet.toncenter.com) for balance & transactions
-qrcode for QR code generation
-localStorage for mnemonic/key storage and sent-address history
-Features implemented
-Screen	What it does
-Setup → Create	Generates 24-word BIP39 mnemonic, derives WalletV4R2 keypair, shows seed phrase grid with warning
-Setup → Import	Validates and imports existing 24-word mnemonic
-Dashboard	Shows address (first/last chars bolded), balance in TON, auto-refreshes every 30 s
-Transactions	Full history with incoming/outgoing labels, counterparty, comment, fee; client-side search by address/amount/comment/hash
-Receive	QR code (ton://transfer/<addr>), address with highlighted segments, copy button, faucet link
-Send	Address + amount + optional comment, percentage shortcuts, two-step confirm dialog
-Address substitution protection (src/utils/addressSecurity.js)
-Four attack vectors covered with realistic user scenarios:
+### Поток данных
 
-Clipboard hijacking (critical) — reads clipboard on paste event via Clipboard API, compares with pasted value; blocks Confirm send if mismatch detected
-Post-paste clipboard swap (critical) — if clipboard changes after paste, warns address may have been swapped by malware
-Near-duplicate / first+last char spoofing (warning) — Levenshtein distance ≤ 6 against all previously sent addresses; warns of common "vanity address" attacks
-New address (info) — warns whenever sending to an address not in local send history
-Critical warnings block the Confirm button entirely. Warning/info banners are dismissible individually but reappear in the confirmation modal.
+```
+Пользователь
+    │
+    ▼
+Setup.jsx ──── createWallet() / walletFromMnemonic()
+    │               ↓
+    │         ton.js (генерация ключей через @ton/crypto)
+    │               ↓
+    │         saveWallet(localStorage)
+    │
+    ▼
+Dashboard.jsx ── getBalance() + getTransactions()
+    │               ↓
+    │         TONCenter REST API → fetchWithRetry()
+    │
+    ▼
+Send.jsx ─────── analyseAddress() → предупреждения
+    │               ↓
+    │         sendTon() → локальная подпись BOC → /sendBoc
+    │               ↓
+    │         waitForSeqnoIncrease() → polling seqno
+```
+
+### Хранение данных
+
+Всё хранится в `localStorage` браузера:
+
+| Ключ | Содержимое |
+|------|------------|
+| `ton_wallet_data` | адрес, publicKey (hex), secretKey (hex), mnemonic |
+| `ton_known_addresses` | история отправок (до 50 адресов) |
+| `ton_tx_history_{address}` | кэш транзакций |
+
+---
+
+## 2. Архитектурные компромиссы
+
+### Self-custodial без backend
+**Решение:** приватный ключ и мнемоника хранятся только в `localStorage`.
+**Компромисс:** нет шифрования хранилища — тот, кто получит физический доступ к браузеру, может извлечь ключи. В production-кошельке ключи должны шифроваться паролем пользователя перед сохранением.
+
+### REST API вместо TonClient
+**Решение:** отказались от `TonClient` (@ton/ton) в пользу прямых HTTP-запросов через собственный `fetchWithRetry`.
+**Причина:** `TonClient` использует внутренний HTTP-клиент, который не поддерживает retry при 429 (rate limit) и выбрасывает ошибку немедленно.
+**Компромисс:** больше ручной работы с REST (получение seqno, сериализация BOC), но полный контроль над повторными попытками.
+
+### BOC-подпись на стороне клиента
+**Решение:** транзакция подписывается локально через `wallet.createTransfer()`, затем сериализуется в base64 BOC и отправляется через `/sendBoc`.
+**Компромисс:** приватный ключ никогда не покидает браузер, но транзакция формируется без дополнительной проверки состояния сети (кроме seqno).
+
+### Кэш транзакций
+**Решение:** последние транзакции кэшируются в localStorage и показываются сразу при открытии.
+**Компромисс:** возможно отображение устаревших данных до завершения загрузки. Актуальные данные подгружаются в фоне каждые 60 секунд.
+
+### Только WalletV4
+**Решение:** используется только `WalletContractV4`.
+**Компромисс:** не поддерживаются кошельки V3, V5 и Highload. В реальном приложении нужна автодетекция версии по адресу.
+
+---
+
+## 3. Логика проверок безопасности
+
+### 3.1 Обнаружение подмены буфера обмена (Clipboard Hijacking)
+
+При вставке адреса одновременно захватываются два значения:
+- `e.clipboardData.getData('text')` — что реально вставилось из события браузера
+- `navigator.clipboard.readText()` — что сейчас лежит в OS clipboard
+
+Если они различаются — значит что-то изменило содержимое буфера между моментом копирования и вставки.
+
+```
+pastedValue ≠ clipboardValue → 🚨 Critical: clipboard hijacking
+pastedValue == address, но clipboardValue ≠ address → 🚨 Critical: буфер изменён после вставки
+```
+
+При Critical-предупреждении кнопка подтверждения отправки заблокирована (`disabled`).
+
+### 3.2 Похожие адреса (Levenshtein distance)
+
+Все отправленные адреса записываются в localStorage. При каждом новом вводе считается расстояние Левенштейна между новым адресом и каждым из сохранённых.
+
+- Порог: расстояние ≤ 6
+- Сравнение регистрозависимое — адреса TON в base64, и `EQCz…XYZ` и `EQCz…xyz` визуально разные
+- Расстояние > 0 обязательно — точное совпадение (тот же адрес) не предупреждает
+
+```
+0 < dist(new, known) ≤ 6 → ⚠️ Warning: похож на ранее использованный
+```
+
+### 3.3 Совпадение префикса и суффикса
+
+Распространённая атака: злоумышленник генерирует адрес, у которого совпадают первые и последние несколько символов с адресом жертвы. При беглой проверке пользователь не замечает разницу.
+
+Логика: если новый адрес не совпадает с известным, но первые 4 и последние 4 символа одинаковые — предупреждение.
+
+```
+address[0:4] == known[0:4] AND address[-4:] == known[-4:] AND address ≠ known → ⚠️ Warning: спуфинг
+```
+
+### 3.4 Новый адрес
+
+Любой адрес, которого нет в истории отправок, получает информационное предупреждение — напоминание проверить получателя.
+
+```
+address ∉ sentAddresses → ℹ️ Info: первая отправка на этот адрес
+```
+
+### 3.5 Валидация формы
+
+Перед отправкой проверяется:
+- Адрес парсится через `Address.parse()` (официальный SDK)
+- Нельзя отправить на собственный адрес
+- Сумма > 0 и не превышает баланс
+- Минимальная сумма 0.000000001 TON
+
+### 3.6 Rate limit (429)
+
+`fetchWithRetry` выполняет до 4 попыток с экспоненциальной задержкой: 3с, 6с, 9с, 12с.
+
+---
+
+## 4. Дальнейшие улучшения
+
+### Безопасность
+- **Шифрование хранилища** — шифровать secretKey и mnemonic паролем пользователя (AES-GCM через Web Crypto API) перед сохранением в localStorage. Расшифровывать только при подписи транзакции.
+- **Автоблокировка** — очищать расшифрованные ключи из памяти через N минут бездействия, требовать повторного ввода пароля.
+- **CSP заголовки** — добавить строгий Content-Security-Policy для защиты от XSS.
+- **Защита от фишинга** — проверять домен при открытии (предупреждение если не ожидаемый хост).
+
+### Функциональность
+- **Поддержка нескольких версий кошелька** — автодетекция V3R2 / V4 / V5 по контракту адреса.
+- **Несколько аккаунтов** — хранение и переключение между несколькими кошельками.
+- **Токены Jetton** — отображение и отправка токенов стандарта TEP-74.
+- **NFT** — просмотр NFT в кошельке.
+- **Deep links** — поддержка `ton://transfer/...` для оплаты по ссылке.
+- **Пагинация истории** — сейчас загружаются последние 50 транзакций; нужна загрузка по страницам.
+- **Экспорт истории** — CSV / JSON экспорт транзакций.
+
+### UX
+- **Локализация** — поддержка нескольких языков.
+- **Push-уведомления** — через Service Worker при входящей транзакции.
+- **Тёмная/светлая тема** — переключатель.
+- **Адресная книга** — сохранять контакты с именами, не только историю отправок.
+- **Предпросмотр баланса в TON и USD** — курс через внешний API.
+
+### Техническая часть
+- **Mainnet режим** — переключатель testnet/mainnet с явным предупреждением.
+- **Оффлайн-режим** — подписание транзакций оффлайн, трансляция при наличии сети.
+- **Тесты** — unit-тесты для `addressSecurity.js` и `ton.js`, e2e тесты с моком TonCenter API.
+- **API ключ** — добавить поле для ввода личного TONCenter API ключа, чтобы избежать rate limit.
+- **WebSocket/SSE** — подписка на события по адресу вместо polling каждые 60 секунд.
